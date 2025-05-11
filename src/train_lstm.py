@@ -44,7 +44,7 @@ def train_lstm_main():
         "hidden_dim": 128,
         "batch_size": 32,
         "learning_rate": 1e-3,
-        "epochs": 50,
+        "epochs": 100,
         "dropout": 0.3,
         "weight_decay": 1e-5
     }
@@ -106,6 +106,13 @@ def train_lstm_main():
         weight_decay=config["weight_decay"]
     )
     criterion = torch.nn.CrossEntropyLoss()
+    # add LR scheduler to reduce LR on plateau of val loss
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=2
+    )
 
     # Training loop with validation
     logger.info("Starting training loop")
@@ -139,6 +146,8 @@ def train_lstm_main():
 
         logger.info(f"Epoch {epoch}/{config['epochs']} — Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
         wandb.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "val_accuracy": val_accuracy})
+        # step scheduler on validation loss
+        scheduler.step(val_loss)
 
     # Evaluate on test set
     model.eval()
