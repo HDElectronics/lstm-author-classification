@@ -19,8 +19,8 @@ def main():
     if command == "embeddings":
         logger.info("Building embeddings dataset from folder 'dataset/raw'")
         from src.data_loader import build_dataset
-        build_dataset(raw_dir="dataset/raw",
-                      output_path="dataset/embeddings/dataset.npz")
+        build_dataset(  raw_dir="dataset/raw",
+                        output_path="dataset/embeddings/dataset.npz")
         logger.info("Embeddings dataset built successfully")
     elif command == "train":
         logger.info("Starting LSTM training")

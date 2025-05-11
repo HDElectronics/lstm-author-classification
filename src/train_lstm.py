@@ -7,6 +7,8 @@ from src.load import load_embeddings
 from src.lstm_model import LSTMClassifier
 import numpy as np
 import wandb
+import random
+
 
 def train_lstm_main():
     """
@@ -16,10 +18,15 @@ def train_lstm_main():
     logger = logging.getLogger(__name__)
     logger.info("Starting LSTM training")
 
+    # Set random seed for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+
     # Load embeddings, labels, and author mapping
     emb_path = "dataset/embeddings/dataset.npz"
     logger.info(f"Loading dataset from {emb_path}")
-     # Load embeddings, labels, and (optional) author names
+    # Load embeddings, labels, and (optional) author names
     data    = np.load(emb_path)
     X       = data["embeddings"]   # (N, D)
     y_orig  = data["labels"]       # (N,)
@@ -35,40 +42,102 @@ def train_lstm_main():
 
     # Hyperparameters
     config = {
-        "hidden_dim": 256,
+        "hidden_dim": 128,
         "batch_size": 32,
         "learning_rate": 1e-3,
-        "epochs": 150
+        "epochs": 50,
+        "dropout": 0.3,
+        "weight_decay": 1e-5
     }
     # Initialize W&B
     wandb.init(project="lstm-author-classification", config=config)
-    wandb.run.name = f"lstm_e{config['epochs']}_bs{config['batch_size']}_lr{config['learning_rate']}"
-    wandb.watch(LSTMClassifier(X.shape[1], config["hidden_dim"], num_classes), log="all")
+    wand_run_name = f"lstm_e{config['epochs']}_bs{config['batch_size']}_lr{config['learning_rate']}"
+    wandb.run.name = wand_run_name
+    wandb.watch(LSTMClassifier( X.shape[1],
+                                config["hidden_dim"],
+                                dropout=config["dropout"],
+                                num_classes=num_classes), log="all")
 
-    # Prepare training tensors
-    logger.info("Preparing training tensors")
-    tensor_x = torch.tensor(X, dtype=torch.float32).unsqueeze(1)  # (N,1,D)
-    tensor_y = torch.tensor(y, dtype=torch.long)
+    # Split data into train, validation, and test sets (60/20/20)
+    logger.info("Splitting data into train/val/test sets (60/20/20)")
+    N = X.shape[0]
+    indices = np.arange(N)
+    np.random.seed(42)
+    np.random.shuffle(indices)
+    train_end = int(0.6 * N)
+    val_end = int(0.8 * N)
+    train_idx = indices[:train_end]
+    val_idx = indices[train_end:val_end]
+    test_idx = indices[val_end:]
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val = X[val_idx], y[val_idx]
+    X_test, y_test = X[test_idx], y[test_idx]
+    logger.info(f"Data split: {len(train_idx)} train, {len(val_idx)} val, {len(test_idx)} test")
 
-    # Initialize model, optimizer, and loss
-    logger.info("Initializing model and optimizer")
-    model = LSTMClassifier(X.shape[1], config["hidden_dim"], num_classes)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
+    # Prepare DataLoaders
+    tensor_x_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
+    tensor_y_train = torch.tensor(y_train, dtype=torch.long)
+    tensor_x_val = torch.tensor(X_val, dtype=torch.float32).unsqueeze(1)
+    tensor_y_val = torch.tensor(y_val, dtype=torch.long)
+    tensor_x_test = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
+    tensor_y_test = torch.tensor(y_test, dtype=torch.long)
+
+    train_dataset = TensorDataset(tensor_x_train, tensor_y_train)
+    val_dataset = TensorDataset(tensor_x_val, tensor_y_val)
+    test_dataset = TensorDataset(tensor_x_test, tensor_y_test)
+
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False)
+
+    # Initialize model, optimizer, and loss function
+    logger.info("Initializing model, optimizer, and loss function")
+    model = LSTMClassifier( X.shape[1],
+                            config["hidden_dim"],
+                            dropout=config["dropout"],
+                            num_classes=num_classes)
+    optimizer = torch.optim.Adam(   model.parameters(),
+                                    lr=config["learning_rate"],
+                                    weight_decay=config["weight_decay"])
     criterion = torch.nn.CrossEntropyLoss()
 
-    # Training loop (no batching)
+    # Training loop with validation
     logger.info("Starting training loop")
     for epoch in range(1, config["epochs"] + 1):
-        # Forward + backward on full dataset
-        preds = model(tensor_x)
-        loss = criterion(preds, tensor_y)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        avg_loss = loss.item()
-        logger.info(f"Epoch {epoch}/{config['epochs']} — Avg Loss: {avg_loss:.4f}")
-        # Log to W&B
-        wandb.log({"epoch": epoch, "avg_loss": avg_loss})
+        model.train()
+        train_loss = 0.0
+        for xb, yb in train_loader:
+            optimizer.zero_grad()
+            preds = model(xb)
+            loss = criterion(preds, yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * xb.size(0)
+        train_loss /= len(train_loader.dataset)
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                preds = model(xb)
+                loss = criterion(preds, yb)
+                val_loss += loss.item() * xb.size(0)
+        val_loss /= len(val_loader.dataset)
+
+        logger.info(f"Epoch {epoch}/{config['epochs']} — Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+        wandb.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+
+    # Evaluate on test set
+    model.eval()
+    test_loss = 0.0
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            preds = model(xb)
+            loss = criterion(preds, yb)
+            test_loss += loss.item() * xb.size(0)
+    test_loss /= len(test_loader.dataset)
+    logger.info(f"Test Loss: {test_loss:.4f}")
+    wandb.log({"test_loss": test_loss})
     # Save trained model checkpoint with author mapping
     save_dir = "models"
     os.makedirs(save_dir, exist_ok=True)
