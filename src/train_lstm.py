@@ -1,4 +1,3 @@
-
 import logging
 import os
 import torch
@@ -92,13 +91,20 @@ def train_lstm_main():
 
     # Initialize model, optimizer, and loss function
     logger.info("Initializing model, optimizer, and loss function")
-    model = LSTMClassifier( X.shape[1],
-                            config["hidden_dim"],
-                            dropout=config["dropout"],
-                            num_classes=num_classes)
-    optimizer = torch.optim.Adam(   model.parameters(),
-                                    lr=config["learning_rate"],
-                                    weight_decay=config["weight_decay"])
+    model = LSTMClassifier(
+        embedding_dim=X.shape[1],
+        hidden_dim=128,
+        num_classes=num_classes,
+        dropout=0.3,
+        num_layers=2,
+        bidirectional=True,
+        use_attention=True
+    )
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"]
+    )
     criterion = torch.nn.CrossEntropyLoss()
 
     # Training loop with validation
@@ -111,33 +117,46 @@ def train_lstm_main():
             preds = model(xb)
             loss = criterion(preds, yb)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
         train_loss /= len(train_loader.dataset)
 
         model.eval()
         val_loss = 0.0
+        correct_val = 0
+        total_val = 0
         with torch.no_grad():
             for xb, yb in val_loader:
-                preds = model(xb)
-                loss = criterion(preds, yb)
+                logits = model(xb)
+                loss = criterion(logits, yb)
                 val_loss += loss.item() * xb.size(0)
-        val_loss /= len(val_loader.dataset)
+                _, preds = torch.max(logits, dim=1)
+                correct_val += (preds == yb).sum().item()
+                total_val += yb.size(0)
+        val_loss /= total_val
+        val_accuracy = correct_val / total_val
 
-        logger.info(f"Epoch {epoch}/{config['epochs']} — Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        wandb.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+        logger.info(f"Epoch {epoch}/{config['epochs']} — Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+        wandb.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "val_accuracy": val_accuracy})
 
     # Evaluate on test set
     model.eval()
     test_loss = 0.0
+    correct_test = 0
+    total_test = 0
     with torch.no_grad():
         for xb, yb in test_loader:
-            preds = model(xb)
-            loss = criterion(preds, yb)
+            logits = model(xb)
+            loss = criterion(logits, yb)
             test_loss += loss.item() * xb.size(0)
-    test_loss /= len(test_loader.dataset)
-    logger.info(f"Test Loss: {test_loss:.4f}")
-    wandb.log({"test_loss": test_loss})
+            _, preds = torch.max(logits, dim=1)
+            correct_test += (preds == yb).sum().item()
+            total_test += yb.size(0)
+    test_loss /= total_test
+    test_accuracy = correct_test / total_test
+    logger.info(f"Test Loss: {test_loss:.4f}, Test Acc: {test_accuracy:.4f}")
+    wandb.log({"test_loss": test_loss, "test_accuracy": test_accuracy})
     # Save trained model checkpoint with author mapping
     save_dir = "models"
     os.makedirs(save_dir, exist_ok=True)
