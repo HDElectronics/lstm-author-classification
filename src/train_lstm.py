@@ -41,13 +41,14 @@ def train_lstm_main():
 
     # Hyperparameters
     config = {
-        "hidden_dim": 128,
+        "hidden_dim": 64,
         "batch_size": 32,
         "learning_rate": 1e-3,
-        "epochs": 100,
-        "dropout": 0.3,
-        "weight_decay": 1e-5
+        "epochs": 200,
+        "dropout": 0.5,
+        "weight_decay": 1e-4
     }
+
     # Initialize W&B
     wandb.init(project="lstm-author-classification", config=config)
     wand_run_name = f"lstm_e{config['epochs']}_bs{config['batch_size']}_lr{config['learning_rate']}"
@@ -89,14 +90,21 @@ def train_lstm_main():
     val_loader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False)
 
-    # Initialize model, optimizer, and loss function
-    logger.info("Initializing model, optimizer, and loss function")
+    # Prepare model dir & early-stopping variables
+    save_dir = "models"
+    os.makedirs(save_dir, exist_ok=True)
+    best_model_path = os.path.join(save_dir, "best.pt")
+    best_val = float("inf")
+    patience = 5
+    counter = 0
+
+    # Initialize model, optimizer, weighted loss, scheduler
     model = LSTMClassifier(
         embedding_dim=X.shape[1],
-        hidden_dim=128,
+        hidden_dim=config["hidden_dim"],
         num_classes=num_classes,
-        dropout=0.3,
-        num_layers=2,
+        dropout=config["dropout"],
+        num_layers=1,
         bidirectional=True,
         use_attention=True
     )
@@ -105,16 +113,16 @@ def train_lstm_main():
         lr=config["learning_rate"],
         weight_decay=config["weight_decay"]
     )
-    criterion = torch.nn.CrossEntropyLoss()
-    # add LR scheduler to reduce LR on plateau of val loss
+    # class‐weighted loss
+    class_counts = np.bincount(y_train)
+    class_weights = torch.tensor(1.0 / class_counts, dtype=torch.float32)
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+    # LR scheduler on plateau
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=0.5,
-        patience=2
+        optimizer, mode="min", factor=0.5, patience=2
     )
 
-    # Training loop with validation
+    # Training loop with early stopping
     logger.info("Starting training loop")
     for epoch in range(1, config["epochs"] + 1):
         model.train()
@@ -144,10 +152,29 @@ def train_lstm_main():
         val_loss /= total_val
         val_accuracy = correct_val / total_val
 
-        logger.info(f"Epoch {epoch}/{config['epochs']} — Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
-        wandb.log({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "val_accuracy": val_accuracy})
-        # step scheduler on validation loss
+        # log & scheduler step
+        logger.info(f"Epoch {epoch}/{config['epochs']} — "
+                    f"Train Loss: {train_loss:.4f}, "
+                    f"Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_accuracy": val_accuracy
+        })
         scheduler.step(val_loss)
+
+        # early stopping
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save(model.state_dict(), best_model_path)
+            counter = 0
+        else:
+            counter += 1
+            if counter >= patience:
+                logger.info(f"Early stopping at epoch {epoch}")
+                model.load_state_dict(torch.load(best_model_path))
+                break
 
     # Evaluate on test set
     model.eval()
