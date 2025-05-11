@@ -1,0 +1,5 @@
+arabert
+transformers
+torch
+numpy
+wandb

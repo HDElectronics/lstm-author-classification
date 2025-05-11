@@ -1,0 +1,9 @@
+.DS_Store
+.vscode/
+wandb/
+dataset/embeddings/*
+dataset/raw/*
+__pycache__/
+*.pyc
+*.pkl
+*.pt
